@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Teachable Machine + MQTT (Secure 8884)</title>
+  <title>Teachable Machine + MQTT (wss 8000)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest"></script>
   <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/image@latest"></script>
@@ -19,7 +19,7 @@
   </style>
 </head>
 <body>
-  <h2>Teachable Machine + MQTT</h2>
+  <h2>Teachable Machine + MQTT (Secure WSS: 8000)</h2>
   <button onclick="init('environment')">Start (Back Camera)</button>
   <button onclick="init('user')">Start (Front Camera)</button>
   <button onclick="stop()">Stop</button>
@@ -30,7 +30,6 @@
 
   <script type="text/javascript">
     const URL = "https://teachablemachine.withgoogle.com/models/klxDOYTDp/";
-    const MQTT_URL = "wss://broker.hivemq.com:8884/mqtt";
     const MQTT_TOPIC = "ktmn";
 
     let model, webcam, labelContainer, maxPredictions;
@@ -49,28 +48,35 @@
     function connectMQTT() {
       return new Promise((resolve, reject) => {
         try {
-          mqttClient = new Paho.MQTT.Client(MQTT_URL, "web_" + Math.floor(Math.random() * 10000));
+          const clientId = "web_" + Math.floor(Math.random() * 10000);
+          mqttClient = new Paho.MQTT.Client("broker.hivemq.com", 8000, "/mqtt", clientId);
 
           mqttClient.onConnectionLost = (responseObject) => {
-            updateStatus("MQTT ขาดการเชื่อมต่อ", "error");
-            setTimeout(() => { if (isRunning) connectMQTT(); }, 5000);
+            console.error("MQTT lost:", responseObject.errorMessage);
+            updateStatus("MQTT lost. Reconnecting...", "error");
+            if (isRunning) {
+              setTimeout(() => connectMQTT().catch(() => {}), 5000);
+            }
           };
 
           mqttClient.connect({
             useSSL: true,
+            timeout: 30,
+            keepAliveInterval: 60,
+            cleanSession: true,
             onSuccess: () => {
+              console.log("MQTT connected");
               updateStatus("MQTT เชื่อมต่อสำเร็จ", "success");
               resolve();
             },
             onFailure: (e) => {
-              updateStatus("MQTT เชื่อมต่อล้มเหลว: " + e.errorMessage, "error");
+              console.error("MQTT failed:", e.errorMessage);
+              updateStatus("MQTT ล้มเหลว: " + e.errorMessage, "error");
               reject(e);
-            },
-            timeout: 10,
-            keepAliveInterval: 30,
-            cleanSession: true
+            }
           });
         } catch (error) {
+          console.error("MQTT setup error:", error);
           updateStatus("MQTT setup error: " + error.message, "error");
           reject(error);
         }
@@ -91,9 +97,20 @@
         updateStatus("โหลดโมเดลสำเร็จ", "success");
 
         updateStatus("กำลังเปิดกล้อง...");
-        webcam = new tmImage.Webcam(224, 224, false);
-        await webcam.setup({ facingMode: facingMode });
-        await webcam.play();
+        webcam = new tmImage.Webcam(320, 240, false);
+        try {
+          await webcam.setup({ facingMode: facingMode || "environment" });
+          await webcam.play();
+        } catch (error) {
+          if (error.name === "NotAllowedError") {
+            updateStatus("กรุณาอนุญาตการเข้าถึงกล้อง", "error");
+          } else if (error.name === "NotFoundError") {
+            updateStatus("ไม่พบกล้องที่ระบุ", "error");
+          } else {
+            updateStatus("ไม่สามารถเปิดกล้องได้: " + error.message, "error");
+          }
+          throw error;
+        }
         document.getElementById("webcam-container").innerHTML = '';
         document.getElementById("webcam-container").appendChild(webcam.canvas);
 
@@ -107,6 +124,7 @@
         window.requestAnimationFrame(loop);
 
       } catch (error) {
+        console.error("Init error:", error);
         updateStatus("Error: " + error.message, "error");
         isRunning = false;
       }
@@ -121,7 +139,9 @@
           updateStatus("Prediction error: " + error.message, "error");
         }
       }
-      if (isRunning) window.requestAnimationFrame(loop);
+      if (isRunning) {
+        setTimeout(() => window.requestAnimationFrame(loop), 100);
+      }
     }
 
     async function predict() {
@@ -136,7 +156,7 @@
         if (prob >= 0.9 && !sending) {
           sending = true;
           paused = true;
-          updateStatus(`พบ ${className} (${(prob * 100).toFixed(1)}%) - กำลังส่ง...`, "success");
+          updateStatus(`พบ ${className} - กำลังส่ง...`, "success");
 
           if (timeoutId) clearTimeout(timeoutId);
           timeoutId = setTimeout(() => {
@@ -147,7 +167,7 @@
                 mqttClient.send(message);
                 updateStatus(`ส่งแล้ว: ${className}`, "success");
               } else {
-                updateStatus("MQTT ไม่เชื่อมต่อ", "error");
+                updateStatus("MQTT ไม่ได้เชื่อมต่อ", "error");
               }
             } catch (error) {
               updateStatus("ส่ง MQTT ล้มเหลว: " + error.message, "error");
@@ -158,7 +178,7 @@
                 if (isRunning) updateStatus("กำลังตรวจจับ...", "success");
               }, 1000);
             }
-          }, 5000); // รอ 5 วิ ก่อนส่ง
+          }, 3000);
           break;
         }
       }
@@ -183,13 +203,10 @@
         mqttClient = null;
       }
 
-      updateStatus("หยุดแล้ว", "status");
+      updateStatus("หยุดการทำงานแล้ว", "status");
     }
 
-    window.addEventListener('beforeunload', function() {
-      stop();
-    });
+    window.addEventListener('beforeunload', stop);
   </script>
 </body>
 </html>
-
